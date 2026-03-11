@@ -1,6 +1,4 @@
  # SPMe+: A Spatially-Resolved SPM for LIB/LMB
- 
-Simulate OCP data collection using PyBaMM for half-cells cobbled together from the literature.
 
 ## Installation
 
