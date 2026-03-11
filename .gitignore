@@ -5,3 +5,5 @@ archive
 datasets/
 .idea/
 __pycache__/
+ASSETS/
+*.lyx
