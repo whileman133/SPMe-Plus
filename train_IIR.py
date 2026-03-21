@@ -9,7 +9,7 @@ import pyswarms as ps
 from matplotlib import pyplot as plt
 
 import util
-from spme import SSCGainTheoretical, SSCTimeConstantSpline, SolidStoichiometryCorrection, SSCGainSpline, SSCMultiplicativeSplineTimeConstant, SSCMultiplierSpline, SSCTimeConstantPropdUocp, SSCBlend, SSCTimeConstantTheoretical, SSCTimeConstantTheoretical_3p
+from spme import SSCGainTheoretical, SSCTimeConstantSpline, SolidStoichiometryCorrection, SSCGainSpline, SSCMultiplicativeSplineTimeConstant, SSCMultiplierSpline, SSCTimeConstantPropdUocp, SSCBlend, SSCTimeConstantTheoretical, SSCTimeConstantTheoretical_3p, SSCTimeConstantTF
 
 
 class IIRRegressor(ABC):
@@ -302,16 +302,12 @@ class IIRRegressorTheoreticalGainBlend(IIRRegressor):
         cell: util.LMBCell,
         x: float,
         dataset: dict,
-        initial,
+        tau: SSCTimeConstantTF,
         TdegC: float = 25,
         ts: float = 1.0,
-        tau_lb: float = 0.001,
-        tau_ub: float = 1000,
         n_control_pts: int = 8,
      ):
         super().__init__(cell, x, dataset, TdegC, ts)
-        self.lb = tau_lb
-        self.ub = tau_ub
         self.gp = 'blend'
 
         # Define control points for the interpolation of tau over thetas_avg.
@@ -320,13 +316,12 @@ class IIRRegressorTheoreticalGainBlend(IIRRegressor):
             cell.pos.theta0,    # =theta_max
             n_control_pts
         )
-        self.initial = initial
 
         # Precompute DC gain for the solid stoichiometry correction.
         self.gain = SSCGainTheoretical(cell, x, TdegC=TdegC)
+        self.tau = tau
 
         self.cost0 = None
-        self.tau = None
         self.blend = None
         self.correction = None
 
@@ -335,56 +330,32 @@ class IIRRegressorTheoreticalGainBlend(IIRRegressor):
         sim_data: dict,
         param_vect: np.ndarray
     ):
-        tau_vect_log10 = param_vect[:-2]
-        ba, bd = param_vect[-2:]
+        ba, bd = param_vect
         fom_sim = sim_data['pybamm']
         spme_sim = sim_data['spme']
         iapp = fom_sim['iapp']
         thetas_avg = spme_sim.thetas_avg
         thetass_bar = spme_sim.thetass - spme_sim.thetas_avg
-        tau = SSCTimeConstantSpline(
-            self.thetas_avg_ctl, tau_vect_log10, lb=self.lb, ub=self.ub)
         blend = SSCBlend(ba, bd)
         return SolidStoichiometryCorrection(
-            self.cell, self.gain, tau, blend, self.ts, self.TdegC,
+            self.cell, self.gain, self.tau, blend, self.ts, self.TdegC,
             gain_placement=self.gp,
         ).run(iapp, thetas_avg, thetass_bar)
 
     def run(self):
-        lb_vect = np.log10(self.lb * np.ones(len(self.thetas_avg_ctl)))
-        ub_vect = np.log10(self.ub * np.ones(len(self.thetas_avg_ctl)))
-        lb_vect = np.concatenate((lb_vect, np.zeros(2)))
-        ub_vect = np.concatenate((ub_vect, np.ones(2)))
+        lb_vect = np.zeros(2)
+        ub_vect = np.ones(2)
 
-        pop_size = 50
-        initial_population = []
-        for init_tau, init_blend in self.initial:
-            initial_vect = init_tau.param_vec_log10
-            if init_blend == 'bb':
-                init_blend = np.array([0, 0])
-            elif init_blend == 'cc':
-                init_blend = np.array([1, 1])
-            elif init_blend == 'cb':
-                init_blend = np.array([0, 1])
-            elif init_blend == 'bc':
-                init_blend = np.array([1, 0])
-            else:
-                init_blend = np.array(init_blend)
-            initial_vect = np.concatenate((initial_vect, init_blend))
-            initial_population.append(initial_vect)
-        for k in range(pop_size - len(initial_population)):
-            initial_population.append(np.random.uniform(low=lb_vect, high=ub_vect))
-        initial_population = np.array(initial_population)
-
+        pop_size = 10
         # Run PSO to find an initial point.
         options = {'c1': 0.5, 'c2': 0.3, 'w':0.9, 'k': 3, 'p': 2}
         pso = ps.single.LocalBestPSO(
             n_particles=pop_size,
             dimensions=len(lb_vect),
-            init_pos=initial_population,
             options=options,
+            bounds=(lb_vect, ub_vect),
         )
-        best_cost, best_pos = pso.optimize(self.cost, iters=100)
+        best_cost, best_pos = pso.optimize(self.cost, iters=50)
 
         # Next, run a conventional optimizer to refine the solution.
         def cb(intermediate_result):
@@ -402,12 +373,9 @@ class IIRRegressorTheoreticalGainBlend(IIRRegressor):
         )
         cost = res.fun
         param_vect = res.x
-        tau_vec_log10 = param_vect[:-2]
-        ba, bd = param_vect[-2:]
+        ba, bd = param_vect
 
         self.cost0 = cost
-        self.tau = SSCTimeConstantSpline(
-            self.thetas_avg_ctl, tau_vec_log10, lb=self.lb, ub=self.ub)
         self.blend = SSCBlend(ba, bd)
         self.correction = SolidStoichiometryCorrection(
             self.cell, self.gain, self.tau, self.blend, self.ts, self.TdegC,
@@ -424,9 +392,9 @@ if __name__ == '__main__':
         #'cb',
         #'cc',
         #'bc',
-        '1p',
-        '3p',
-        #'blend',
+        #'1p',
+        #'3p',
+        'blend',
     }
 
     cell = data['cell']
@@ -502,21 +470,15 @@ if __name__ == '__main__':
 
     # Full blend
     if 'blend' in enable:
+        tau1_tf, theta1_tf = util.load_mat_tau(os.path.join('MATLAB', 'CELLPARAMS', 'tau1.mat'))
+        tau2_tf, theta2_tf = util.load_mat_tau(os.path.join('MATLAB', 'CELLPARAMS', 'tau2.mat'))
+        tau1 = SSCTimeConstantTF(theta1_tf, tau1_tf)
+        tau2 = SSCTimeConstantTF(theta2_tf, tau2_tf)
         regressor1blend = IIRRegressorTheoreticalGainBlend(
-            cell, x=1, initial=[
-                (iir_data['correction1bb'].tau, 'bb'),
-                (iir_data['correction1cb'].tau, 'cb'),
-                (iir_data['correction1cc'].tau, 'cc'),
-                (iir_data['correction1bc'].tau, 'bc'),
-            ], TdegC=TdegC, ts=ts, dataset=data['datasets']['train'])
+            cell, x=1, tau=tau1, TdegC=TdegC, ts=ts, dataset=data['datasets']['train'])
         regressor1blend.run()
         regressor2blend = IIRRegressorTheoreticalGainBlend(
-            cell, x=2, initial=[
-                (iir_data['correction2bb'].tau, 'bb'),
-                (iir_data['correction2cb'].tau, 'cb'),
-                (iir_data['correction2cc'].tau, 'cc'),
-                (iir_data['correction2bc'].tau, 'bc'),
-            ], TdegC=TdegC, ts=ts, dataset=data['datasets']['train'])
+            cell, x=2, tau=tau2, TdegC=TdegC, ts=ts, dataset=data['datasets']['train'])
         regressor2blend.run()
         iir_data['correction1blend'] = regressor1blend.correction
         iir_data['correction2blend'] = regressor2blend.correction

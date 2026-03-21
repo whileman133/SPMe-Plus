@@ -558,7 +558,7 @@ class SSCSplineParameter(SSCParameter):
     def x_label(self):
         return r"Average Solid Stoichiometry, $\theta_\mathrm{s,avg}$"
 
-    def plot(self, title=None, ax=None, label="Cubic Spline (log10)", color='C0'):
+    def plot(self, title=None, ax=None, label="Cubic Spline (log10)", color='C0', **kwargs):
         if title is None:
             title = f"{self.param_name} vs. Average Solid Stoichiometry"
         thetas_vec = np.linspace(np.min(self.thetas_vec), np.max(self.thetas_vec), 1000)
@@ -568,8 +568,8 @@ class SSCSplineParameter(SSCParameter):
             noax = True
             _, ax = plt.subplots(constrained_layout=True)
             ax.set_box_aspect(1 / scipy.constants.golden)
-        plt.plot(thetas_vec, param_vec, label=label, color=color)
-        plt.plot(self.thetas_vec, self(self.thetas_vec), "o", markersize=5, label=None, color=color)
+        plt.plot(thetas_vec, param_vec, label=label, color=color, **kwargs)
+        plt.plot(self.thetas_vec, self(self.thetas_vec), "o", markersize=5, label=None, color=color, **kwargs)
         if noax:
             plt.xlabel(self.x_label)
             plt.ylabel(f"{self.param_name}, {self.param_symbol}")
@@ -611,15 +611,19 @@ class SSCGainTheoretical(SSCParameter):
     def __call__(self, thetas_avg_vec: np.ndarray, *args, **kwargs):
         return self.interp(thetas_avg_vec)
 
-    def plot(self, title=None):
+    def plot(self, title=None, ax=None, label=None, color='C0'):
         if title is None:
             title = f"Gain vs. Average Solid Stoichiometry"
-        _, ax = plt.subplots(constrained_layout=True)
-        ax.set_box_aspect(1 / scipy.constants.golden)
-        plt.plot(self.theta_vec, self.dcgain_vec)
-        plt.xlabel(r"Average Solid Stoichiometry, $\theta_\mathrm{s,avg}$")
-        plt.ylabel(r"DC Gain, $\bar{\theta}_\mathrm{s,dc}$")
-        plt.title(title)
+        noax = False
+        if ax is None:
+            noax = True
+            _, ax = plt.subplots(constrained_layout=True)
+            ax.set_box_aspect(1 / scipy.constants.golden)
+        plt.plot(self.theta_vec, self.dcgain_vec, label=label, color=color)
+        if noax:
+            plt.xlabel(r"Average Solid Stoichiometry, $\theta_\mathrm{s,avg}$")
+            plt.ylabel(r"DC Gain, $\bar{\theta}_\mathrm{s,dc}$")
+            plt.title(title)
         return ax
 
 
@@ -705,6 +709,41 @@ class SSCTimeConstantTheoretical_0p(SSCParameter):
         self.tau_vec = tau
         self.interp = PchipInterpolator(
             np.flip(ocp.theta),  # flip for ascending order
+            np.flip(tau),
+            extrapolate=True
+        )
+
+    def __call__(self, thetas_avg_vec: np.ndarray, *args, **kwargs):
+        return self.interp(thetas_avg_vec)
+
+    def plot(self, title=None, ax=None, label=None, color='C0'):
+        if title is None:
+            title = f"Time Constant vs. Average Solid Stoichiometry"
+        noax = False
+        if ax is None:
+            noax = True
+            _, ax = plt.subplots(constrained_layout=True)
+            ax.set_box_aspect(1 / scipy.constants.golden)
+        plt.plot(self.theta_vec, self.tau_vec, label=label, color=color)
+        if noax:
+            plt.xlabel(r"Average Solid Stoichiometry, $\theta_\mathrm{s,avg}$")
+            plt.ylabel(r"Time Constant [s]")
+            plt.title(title)
+        return ax
+
+
+class SSCTimeConstantTF(SSCParameter):
+    def __init__(self, thetas: np.ndarray, tau: np.ndarray):
+        """
+        :param cell: Cell model containing parameter values.
+        :param TdegC: Temperature in degrees Celsius.
+        """
+
+        super().__init__()
+        self.theta_vec = thetas
+        self.tau_vec = tau
+        self.interp = PchipInterpolator(
+            np.flip(thetas),
             np.flip(tau),
             extrapolate=True
         )
@@ -1098,6 +1137,9 @@ class SPMePlusOutput:
 class SPMePlus:
     """
     SPMe with solid stoichiometry corrections at the edges of the porous electrode.
+
+    When use_ssc_feedback=True, use theta_s,avg,r(x) instead of theta_s,avg
+    to lookup LTV filter gain and time constants.
     """
 
     def __init__(self,
@@ -1105,7 +1147,9 @@ class SPMePlus:
         ns: int, ne_eff: int, ne_pos: int,
         correction1: SolidStoichiometryCorrection,  # at x=1
         correction2: SolidStoichiometryCorrection,  # at x=2
-        ts: float = 1.0, TdegC: float = 25, use_constant_Ds=True,
+        ts: float = 1.0, TdegC: float = 25,
+        use_constant_Ds=True,
+        use_ssc_feedback=False,
      ):
         self.cell = cell
         self.ts = ts
@@ -1114,6 +1158,7 @@ class SPMePlus:
         self.solid_fvs = SolidFVS(cell, N=ns, ts=ts, TdegC=TdegC, use_constant_Ds=use_constant_Ds)
         self.c1 = correction1
         self.c2 = correction2
+        self.use_ssc_feedback = use_ssc_feedback
 
     def run(self, iapp: np.ndarray, soc0_pct: float, **kwargs) -> SPMePlusOutput:
         """
@@ -1144,10 +1189,16 @@ class SPMePlus:
             thetass_km = self.solid_fvs.thetas(r=1)
             xe = self.electrolyte_fvs.step(iappkm)
             xs = self.solid_fvs.step(iappkm)
-            xc = np.array([
-                self.c1.step(iappkm, thetas_avgkm, thetass_km - thetas_avgkm),
-                self.c2.step(iappkm, thetas_avgkm, thetass_km - thetas_avgkm)
-            ]).reshape(-1,1)
+            if self.use_ssc_feedback:
+                xc = np.array([
+                    self.c1.step(iappkm, thetas_avgkm + xc[0], thetass_km - thetas_avgkm),
+                    self.c2.step(iappkm, thetas_avgkm + xc[1], thetass_km - thetas_avgkm)
+                ]).reshape(-1,1)
+            else:
+                xc = np.array([
+                    self.c1.step(iappkm, thetas_avgkm, thetass_km - thetas_avgkm),
+                    self.c2.step(iappkm, thetas_avgkm, thetass_km - thetas_avgkm)
+                ]).reshape(-1, 1)
             Xe[k, :] = xe.T
             Xs[k, :] = xs.T
             Xc[k, :] = xc.T

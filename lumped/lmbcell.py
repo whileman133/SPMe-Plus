@@ -114,6 +114,7 @@ class LumpedLMBModel(BaseLumpedModel):
             "iapp [C-rate]", "soc [%]", "vcell [V]",
             "thetae", "FNe [A]", ["ie [A]", "is [A]"],
             "ifdl [A]", "phie [V]", "thetass",
+            "pos_thetas_bar",
         ]
 
     @property

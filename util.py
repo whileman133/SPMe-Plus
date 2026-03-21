@@ -511,6 +511,13 @@ def load_mat_cell_model(filepath):
     return cell
 
 
+def load_mat_tau(filepath):
+    data = sio.loadmat(filepath)
+    tau = data['tau'].T[0]
+    theta = data['thetap'][0]
+    return tau, theta
+
+
 @dataclass
 class FOMOutput:
     soc0Pct: float
